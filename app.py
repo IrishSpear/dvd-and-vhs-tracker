@@ -382,6 +382,7 @@ class DB:
                     title TEXT NOT NULL,
                     author TEXT NOT NULL,
                     category_id INTEGER,
+                    location TEXT,
                     price_cents INTEGER NOT NULL DEFAULT 0,
                     cost_cents INTEGER NOT NULL DEFAULT 0,
                     stock_qty INTEGER NOT NULL DEFAULT 0,
@@ -502,6 +503,10 @@ class DB:
                 cur.execute("ALTER TABLE returns ADD COLUMN refund_tax_cents INTEGER NOT NULL DEFAULT 0;")
                 conn.commit()
 
+            if "location" not in self._columns(conn, "books"):
+                cur.execute("ALTER TABLE books ADD COLUMN location TEXT;")
+                conn.commit()
+
             # Seed settings
             defaults = {
                 "store_name": "My DVD/VHS Store",
@@ -609,10 +614,10 @@ class DB:
         in_stock_only: bool = False,
         include_inactive: bool = False,
         category_id: Optional[int] = None
-    ) -> List[Tuple[int, Optional[str], str, str, int, int, int, int, Optional[str]]]:
+    ) -> List[Tuple[int, Optional[str], str, str, Optional[str], int, int, int, int, Optional[str]]]:
         """
         Returns:
-          (id, isbn, title, author, price_cents, cost_cents, stock_qty, is_active, category_name)
+          (id, isbn, title, author, location, price_cents, cost_cents, stock_qty, is_active, category_name)
         """
         s = (search or "").strip()
         where = []
@@ -637,7 +642,7 @@ class DB:
 
         sql = f"""
             SELECT
-                b.id, b.isbn, b.title, b.author,
+                b.id, b.isbn, b.title, b.author, b.location,
                 b.price_cents, b.cost_cents, b.stock_qty, b.is_active,
                 c.name
             FROM books b
@@ -656,11 +661,12 @@ class DB:
                     r[1],
                     str(r[2]),
                     str(r[3]),
-                    int(r[4]),
+                    r[4],
                     int(r[5]),
                     int(r[6]),
                     int(r[7]),
-                    r[8]
+                    int(r[8]),
+                    r[9]
                 ))
             return out
 
@@ -668,7 +674,7 @@ class DB:
         with self._connect() as conn:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id, isbn, title, author, category_id, price_cents, cost_cents, stock_qty, is_active
+                SELECT id, isbn, title, author, category_id, location, price_cents, cost_cents, stock_qty, is_active
                 FROM books WHERE id=?;
             """, (int(book_id),))
             return cur.fetchone()
@@ -677,26 +683,26 @@ class DB:
         with self._connect() as conn:
             cur = conn.cursor()
             cur.execute("""
-                SELECT id, isbn, title, author, category_id, price_cents, cost_cents, stock_qty, is_active
+                SELECT id, isbn, title, author, category_id, location, price_cents, cost_cents, stock_qty, is_active
                 FROM books WHERE isbn=?;
             """, (isbn,))
             return cur.fetchone()
 
-    def add_book(self, isbn, title, author, category_id, price_cents, cost_cents, stock_qty, is_active=1):
+    def add_book(self, isbn, title, author, category_id, location, price_cents, cost_cents, stock_qty, is_active=1):
         with self._connect() as conn:
             conn.execute("""
-                INSERT INTO books(isbn,title,author,category_id,price_cents,cost_cents,stock_qty,is_active)
-                VALUES(?,?,?,?,?,?,?,?);
-            """, (isbn or None, title.strip(), author.strip(), category_id, int(price_cents), int(cost_cents), int(stock_qty), int(is_active)))
+                INSERT INTO books(isbn,title,author,category_id,location,price_cents,cost_cents,stock_qty,is_active)
+                VALUES(?,?,?,?,?,?,?,?,?);
+            """, (isbn or None, title.strip(), author.strip(), category_id, location, int(price_cents), int(cost_cents), int(stock_qty), int(is_active)))
             conn.commit()
 
-    def update_book(self, book_id, isbn, title, author, category_id, price_cents, cost_cents, stock_qty, is_active):
+    def update_book(self, book_id, isbn, title, author, category_id, location, price_cents, cost_cents, stock_qty, is_active):
         with self._connect() as conn:
             conn.execute("""
                 UPDATE books
-                SET isbn=?, title=?, author=?, category_id=?, price_cents=?, cost_cents=?, stock_qty=?, is_active=?
+                SET isbn=?, title=?, author=?, category_id=?, location=?, price_cents=?, cost_cents=?, stock_qty=?, is_active=?
                 WHERE id=?;
-            """, (isbn or None, title.strip(), author.strip(), category_id, int(price_cents), int(cost_cents), int(stock_qty), int(is_active), int(book_id)))
+            """, (isbn or None, title.strip(), author.strip(), category_id, location, int(price_cents), int(cost_cents), int(stock_qty), int(is_active), int(book_id)))
             conn.commit()
 
     def delete_book(self, book_id: int) -> None:
@@ -1563,12 +1569,18 @@ class App:
         ttk.Button(top, text="Restock", command=self.restock_book).pack(side="left", padx=6)
         ttk.Button(top, text="Export CSV", command=self.export_books_csv).pack(side="right")
 
-        self.books_tree = ttk.Treeview(tab, columns=("isbn", "title", "author", "category", "price", "cost", "stock", "active"), show="headings", height=18)
+        self.books_tree = ttk.Treeview(
+            tab,
+            columns=("isbn", "title", "author", "category", "location", "price", "cost", "stock", "active"),
+            show="headings",
+            height=18,
+        )
         for col, lbl, w, anchor in [
             ("isbn", "Barcode", 140, "w"),
             ("title", "Title", 300, "w"),
             ("author", "Studio", 180, "w"),
             ("category", "Format", 130, "w"),
+            ("location", "Location", 140, "w"),
             ("price", "Price", 90, "e"),
             ("cost", "Cost", 90, "e"),
             ("stock", "Stock", 70, "center"),
@@ -1589,10 +1601,10 @@ class App:
             in_stock_only=bool(self.book_instock.get()),
             include_inactive=bool(self.book_inactive.get()),
         )
-        for (bid, isbn, title, author, price, cost, stock, active, catname) in rows:
+        for (bid, isbn, title, author, location, price, cost, stock, active, catname) in rows:
             self.books_tree.insert(
                 "", "end", iid=str(bid),
-                values=(isbn or "", title, author, catname or "", cents_to_money(price), cents_to_money(cost), stock, "yes" if active else "no")
+                values=(isbn or "", title, author, catname or "", location or "", cents_to_money(price), cents_to_money(cost), stock, "yes" if active else "no")
             )
 
         self._refresh_pos_books()
@@ -1621,9 +1633,11 @@ class App:
         title_var = tk.StringVar(value="")
         author_var = tk.StringVar(value="")
         cat_var = tk.StringVar(value=self.last_format_choice)
+        location_var = tk.StringVar(value="")
         price_var = tk.StringVar(value="0.00")
         cost_var = tk.StringVar(value="0.00")
         stock_var = tk.StringVar(value="1")
+        add_another_var = tk.IntVar(value=0)
 
         def show_status(msg: str):
             status_lbl.configure(text=msg)
@@ -1681,7 +1695,6 @@ class App:
         scan_entry = ttk.Entry(frame, textvariable=scan_var, width=46)
         scan_entry.grid(row=r, column=1, pady=4, sticky="w")
         ttk.Button(frame, text="Parse Scan", command=do_parse_scan).grid(row=r, column=2, padx=8)
-        scan_entry.bind("<Return>", lambda _e: do_parse_scan())
         r += 1
 
         ttk.Label(frame, text="Barcode:").grid(row=r, column=0, sticky="w", pady=4)
@@ -1741,6 +1754,10 @@ class App:
 
         cat_var.trace_add("write", on_format_entry_change)
 
+        ttk.Label(frame, text="Location (optional):").grid(row=r, column=0, sticky="w", pady=4)
+        ttk.Entry(frame, textvariable=location_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
+        r += 1
+
         ttk.Label(frame, text="Price (e.g. 12.99):").grid(row=r, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=price_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
         price_btns = ttk.Frame(frame)
@@ -1756,6 +1773,11 @@ class App:
         ttk.Entry(frame, textvariable=stock_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
         r += 1
 
+        ttk.Checkbutton(frame, text="Add another after save", variable=add_another_var).grid(
+            row=r, column=0, columnspan=2, sticky="w", pady=(4, 0)
+        )
+        r += 1
+
         status_lbl = ttk.Label(frame, text="", foreground="#444")
         status_lbl.grid(row=r, column=0, columnspan=3, sticky="w", pady=(8, 0))
         r += 1
@@ -1765,6 +1787,7 @@ class App:
             title = title_var.get().strip()
             author = author_var.get().strip()
             cat_name = cat_var.get().strip()
+            location = location_var.get().strip() or None
             price_s = price_var.get().strip()
             cost_s = cost_var.get().strip()
             stock_s = stock_var.get().strip()
@@ -1807,22 +1830,36 @@ class App:
                     if existing:
                         self.db.adjust_stock(int(existing[0]), 1)
                     else:
-                        self.db.add_book(isbn, title, author, cat_id, price_cents, cost_cents, stock, 1)
+                        self.db.add_book(isbn, title, author, cat_id, location, price_cents, cost_cents, stock, 1)
                 else:
-                    self.db.add_book(isbn, title, author, cat_id, price_cents, cost_cents, stock, 1)
+                    self.db.add_book(isbn, title, author, cat_id, location, price_cents, cost_cents, stock, 1)
             except sqlite3.IntegrityError as e:
                 messagebox.showerror("DB error", f"Could not add title.\n\n{e}", parent=dlg)
                 return
 
-            dlg.destroy()
             self.refresh_books()
             self.refresh_reports()
+            if add_another_var.get():
+                isbn_var.set("")
+                title_var.set("")
+                author_var.set("")
+                location_var.set("")
+                price_var.set("0.00")
+                cost_var.set("0.00")
+                stock_var.set("1")
+                scan_var.set("")
+                scan_entry.focus_set()
+                show_status("Added. Ready for another title.")
+            else:
+                dlg.destroy()
 
         btns = ttk.Frame(frame)
         btns.grid(row=r, column=0, columnspan=3, sticky="e", pady=(10, 0))
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="right")
         ttk.Button(btns, text="Add Title", command=on_add).pack(side="right", padx=8)
 
+        dlg.bind("<Return>", lambda _e: on_add())
+        scan_entry.bind("<Shift-Return>", lambda _e: do_parse_scan())
         scan_entry.focus_set()
         self.root.wait_window(dlg)
 
@@ -1836,7 +1873,7 @@ class App:
             messagebox.showerror("Missing", "Title not found.")
             return
 
-        _id, isbn, title, author, cat_id, price, cost, stock, active = row
+        _id, isbn, title, author, cat_id, location, price, cost, stock, active = row
 
         catname = ""
         if cat_id:
@@ -1858,6 +1895,7 @@ class App:
         title_var = tk.StringVar(value=title)
         author_var = tk.StringVar(value=author)
         cat_var = tk.StringVar(value=catname)
+        location_var = tk.StringVar(value=location or "")
         price_var = tk.StringVar(value=f"{int(price)/100:.2f}")
         cost_var = tk.StringVar(value=f"{int(cost)/100:.2f}")
         stock_var = tk.StringVar(value=str(stock))
@@ -1891,6 +1929,10 @@ class App:
         ttk.Entry(frame, textvariable=cat_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
         r += 1
 
+        ttk.Label(frame, text="Location (optional):").grid(row=r, column=0, sticky="w", pady=4)
+        ttk.Entry(frame, textvariable=location_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
+        r += 1
+
         ttk.Label(frame, text="Price (e.g. 12.99):").grid(row=r, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=price_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
         price_btns = ttk.Frame(frame)
@@ -1918,6 +1960,7 @@ class App:
             title_val = title_var.get().strip()
             author_val = author_var.get().strip()
             cat_name = cat_var.get().strip()
+            location_val = location_var.get().strip() or None
             price_s = price_var.get().strip()
             cost_s = cost_var.get().strip()
             stock_s = stock_var.get().strip()
@@ -1947,7 +1990,7 @@ class App:
                 cat_id2 = next((c[0] for c in cats if c[1] == cat_name), None)
 
             try:
-                self.db.update_book(bid, isbn_val, title_val, author_val, cat_id2, price2, cost2, stock2, active2)
+                self.db.update_book(bid, isbn_val, title_val, author_val, cat_id2, location_val, price2, cost2, stock2, active2)
             except sqlite3.IntegrityError as e:
                 messagebox.showerror("DB error", f"Could not update.\n\n{e}", parent=dlg)
                 return
@@ -1991,7 +2034,7 @@ class App:
         row = self.db.get_book(bid)
         if not row:
             return
-        active = int(row[8])
+        active = int(row[9])
         self.db.set_book_active(bid, 0 if active else 1)
         self.refresh_books()
 
@@ -2022,11 +2065,15 @@ class App:
         if not path:
             return
         q = """
-            SELECT IFNULL(isbn,''), title, author, price_cents, cost_cents, stock_qty, is_active
+            SELECT IFNULL(isbn,''), title, author, IFNULL(location,''), price_cents, cost_cents, stock_qty, is_active
             FROM books
             ORDER BY title;
         """
-        self.db.export_table_to_csv(q, ["barcode", "title", "studio", "price_cents", "cost_cents", "stock_qty", "is_active"], path)
+        self.db.export_table_to_csv(
+            q,
+            ["barcode", "title", "studio", "location", "price_cents", "cost_cents", "stock_qty", "is_active"],
+            path,
+        )
         messagebox.showinfo("Exported", f"Saved:\n{path}")
 
     # ---------------- Customers tab ----------------
@@ -2289,7 +2336,7 @@ class App:
             return
         for i in self.pos_books_tree.get_children():
             self.pos_books_tree.delete(i)
-        for (bid, isbn, title, author, price, cost, stock, active, cat) in self.db.list_books("", in_stock_only=False, include_inactive=False):
+        for (bid, isbn, title, author, location, price, cost, stock, active, cat) in self.db.list_books("", in_stock_only=False, include_inactive=False):
             self.pos_books_tree.insert("", "end", iid=str(bid), values=(isbn or "", title, cents_to_money(price), stock))
 
     def scan_add(self):
@@ -2347,7 +2394,7 @@ class App:
         b = self.db.get_book(book_id)
         if not b:
             raise ValueError("title missing")
-        _id, isbn, title, author, cat_id, price, cost, stock, active = b
+        _id, isbn, title, author, cat_id, location, price, cost, stock, active = b
         if not int(active):
             raise ValueError("archived")
         if book_id in self.cart:
