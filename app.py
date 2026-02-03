@@ -1,20 +1,19 @@
-# bookstore_all_features_fixed.py
-# Single-file Tkinter + SQLite Bookstore POS with:
-# - Inventory, categories, coupons, discounts (line + order), taxes
+# dvd_vhs_tracker.py
+# Single-file Tkinter + SQLite DVD/VHS POS with:
+# - Inventory, formats, coupons, discounts (line + order), taxes
 # - Cart with inline qty/line-discount editing
 # - Sales + receipt storage, TXT/PDF export (PDF via reportlab if installed)
 # - Returns/refunds (restock inventory)
-# - Reports: daily/monthly, top books/customers, by category, tax export
+# - Reports: daily/monthly, top titles/customers, by format, tax export
 # - Users + roles (admin/clerk), store/receipt settings, backup/restore
-# - Add Book dialog supports scanning:
-#     * ISBN-10/ISBN-13 -> auto lookup title/author (Open Library, needs internet)
-#     * Bookland EAN-13 + 5-digit price add-on -> parse price
+# - Add Title dialog supports scanning:
+#     * UPC/EAN barcode -> auto lookup title/studio (UPCItemDB trial, needs internet)
 #     * Price-only sticker (digits like 1299) -> parse price
 #
 # NOTE:
 # - If you have an existing old DB schema, this file includes a best-effort migration
 #   for an older sales schema that had sales.book_id. If migration cannot be applied,
-#   you may need to delete bookstore.db and re-run.
+#   you may need to delete dvd_vhs_tracker.db and re-run.
 #
 # Tested for logical correctness, but I cannot run this on your machine.
 
@@ -37,8 +36,8 @@ from datetime import datetime, date, timedelta
 from typing import Optional, Dict, Any, List, Tuple
 
 
-DB_PATH = "bookstore.db"
-USER_AGENT = "BookstorePOS/1.0 (+https://openai.com)"
+DB_PATH = "dvd_vhs_tracker.db"
+USER_AGENT = "DVDVHSPOS/1.0 (+https://openai.com)"
 
 
 # -------------------------- Money helpers (integer cents) --------------------------
@@ -112,61 +111,22 @@ def export_pdf_text(text: str, path: str, title: str = "Receipt") -> None:
 
 
 # -------------------------- Barcode / scan helpers --------------------------
-ISBN10_RE = re.compile(r"^\d{9}[\dX]$")
-ISBN13_RE = re.compile(r"^\d{13}$")
+BARCODE_RE = re.compile(r"\d{8,14}")
 
-def isbn13_check_digit(isbn12: str) -> str:
-    """Return the ISBN-13 check digit for the first 12 digits."""
-    if not (isbn12.isdigit() and len(isbn12) == 12):
-        raise ValueError("isbn12 must be 12 digits")
-    total = 0
-    for i, ch in enumerate(isbn12):
-        d = int(ch)
-        total += d if (i % 2 == 0) else 3 * d
-    check = (10 - (total % 10)) % 10
-    return str(check)
-
-def is_valid_isbn13(isbn13: str) -> bool:
-    """Validate ISBN-13 using its check digit."""
-    if not (isbn13.isdigit() and len(isbn13) == 13):
-        return False
-    return isbn13[-1] == isbn13_check_digit(isbn13[:12])
-
-def isbn10_to_isbn13(isbn10: str) -> str:
-    """Convert ISBN-10 to ISBN-13 (prefix 978 + recalculated check digit)."""
-    if not ISBN10_RE.match(isbn10):
-        raise ValueError("not a valid ISBN-10 format")
-    core = "978" + isbn10[:9]  # drop ISBN-10 check digit
-    return core + isbn13_check_digit(core)
-
-def normalize_isbn(raw: str) -> Optional[str]:
+def normalize_barcode(raw: str) -> Optional[str]:
     """
-    Normalize any scan containing an ISBN.
-    - Extracts digits/X
-    - If ISBN-10 => converts to ISBN-13
-    - If ISBN-13 => validates check digit
-    Returns ISBN-13 string or None if not valid.
+    Normalize any scan containing a UPC/EAN-style barcode.
+    - Extracts the first 8-14 digit run
+    Returns the barcode string or None if not found.
     """
     if not raw:
         return None
-
-    s = re.sub(r"[^0-9Xx]", "", raw.strip()).upper()
-
-    # Try to find a 13-digit run first
-    m13 = re.search(r"\d{13}", s)
-    if m13:
-        cand = m13.group(0)
-        return cand if is_valid_isbn13(cand) else None
-
-    # Try ISBN-10 run (9 digits + digit/X)
-    m10 = re.search(r"\d{9}[\dX]", s)
-    if m10:
-        cand10 = m10.group(0)
-        try:
-            return isbn10_to_isbn13(cand10)
-        except Exception:
-            return None
-
+    s = raw.strip()
+    if s.isdigit() and 8 <= len(s) <= 14:
+        return s
+    match = BARCODE_RE.search(s)
+    if match:
+        return match.group(0)
     return None
 
 def parse_price_from_scan(raw: str) -> Optional[str]:
@@ -175,7 +135,6 @@ def parse_price_from_scan(raw: str) -> Optional[str]:
     Supports:
       - "$12.99" or "12.99"
       - digits-only like "1299" => $12.99 (treat as cents)
-      - 5-digit Bookland add-on like "51999" => $19.99
     """
     if not raw:
         return None
@@ -190,12 +149,6 @@ def parse_price_from_scan(raw: str) -> Optional[str]:
     if not digits:
         return None
 
-    # Bookland add-on
-    if len(digits) == 5:
-        p = parse_bookland_addon_price(digits)
-        if p is not None:
-            return p
-
     # Price-only stickers often 3-6 digits representing cents
     if 3 <= len(digits) <= 6:
         cents = int(digits)
@@ -204,81 +157,28 @@ def parse_price_from_scan(raw: str) -> Optional[str]:
     return None
 
 
-def parse_scan_isbn_and_price(raw: str) -> Tuple[Optional[str], Optional[str]]:
+def parse_scan_barcode_and_price(raw: str) -> Tuple[Optional[str], Optional[str]]:
     """
-    Extract ISBN (normalized to ISBN-13) and optional price from:
-    - ISBN-13 only
-    - ISBN-10 (converted to ISBN-13)
-    - ISBN-13 + 5-digit Bookland add-on price
+    Extract barcode and optional price from:
+    - UPC/EAN barcode (8-14 digits)
+    - Mixed scans that include price stickers
     """
     if not raw:
         return None, None
 
     digits = re.sub(r"\D", "", raw)
-    isbn = None
+    barcode = normalize_barcode(raw)
     price = None
 
-    # If scan contains 18+ digits, treat as ISBN-13 + 5-digit add-on
-    if len(digits) >= 18:
-        cand_isbn13 = digits[:13]
-        addon = digits[13:18]
-        if is_valid_isbn13(cand_isbn13):
-            isbn = cand_isbn13
-        if len(addon) == 5:
-            price = parse_bookland_addon_price(addon)
-
-    # Otherwise try generic normalize (handles ISBN-10 -> ISBN-13 too)
-    if isbn is None:
-        isbn = normalize_isbn(raw)
-
-    # If no add-on parsed, try price parsing heuristics unless raw is just ISBN digits
+    # If no price parsed, try price parsing heuristics unless raw is just barcode digits
     if price is None:
-        if isbn and digits and digits.isdigit() and len(digits) in (10, 13):
+        if barcode and digits and digits.isdigit() and len(digits) in (8, 12, 13, 14):
             price = None
         else:
             price = parse_price_from_scan(raw)
 
-    return isbn, price
+    return barcode, price
 
-
-def parse_google_books_price(data: Dict[str, Any]) -> Optional[str]:
-    if not data:
-        return None
-
-    def read_price(entry: Any) -> Optional[float]:
-        if not isinstance(entry, dict):
-            return None
-        amount = entry.get("amount")
-        if isinstance(amount, (int, float)):
-            return float(amount)
-        micros = entry.get("amountInMicros")
-        if isinstance(micros, (int, float)):
-            return float(micros) / 1_000_000
-        return None
-
-    items = data.get("items") or []
-    if not items:
-        return None
-
-    item = items[0] or {}
-    sale_info = item.get("saleInfo") or {}
-    for key in ("listPrice", "retailPrice"):
-        amount = read_price(sale_info.get(key))
-        if amount is not None:
-            return f"{amount:.2f}"
-
-    offers = sale_info.get("offers") or []
-    for offer in offers:
-        for key in ("listPrice", "retailPrice"):
-            amount = read_price(offer.get(key))
-            if amount is not None:
-                return f"{amount:.2f}"
-
-    volume_info = item.get("volumeInfo") or {}
-    amount = read_price(volume_info.get("listPrice"))
-    if amount is not None:
-        return f"{amount:.2f}"
-    return None
 
 
 def fetch_json_with_retry(url: str, timeout: int = 8, retries: int = 2) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
@@ -305,35 +205,30 @@ def fetch_json_with_retry(url: str, timeout: int = 8, retries: int = 2) -> Tuple
     return None, last_error
 
 
-def fetch_book_info_openlibrary(isbn: str) -> Optional[Dict[str, str]]:
+def fetch_title_info_upcitemdb(barcode: str) -> Optional[Dict[str, str]]:
     """
-    Lookup book title/authors via Open Library Books API.
-    Requires internet access. Returns {"title":..., "author":...} or None.
+    Lookup title/studio via UPCItemDB trial API.
+    Requires internet access. Returns {"title":..., "studio":...} or None.
     """
-    if not isbn:
+    if not barcode:
         return None
-    url = "https://openlibrary.org/api/books?" + urllib.parse.urlencode({
-        "bibkeys": f"ISBN:{isbn}",
-        "format": "json",
-        "jscmd": "data",
+    url = "https://api.upcitemdb.com/prod/trial/lookup?" + urllib.parse.urlencode({
+        "upc": barcode,
     })
     data, _error = fetch_json_with_retry(url)
     if not data:
         return None
 
-    key = f"ISBN:{isbn}"
-    if key not in data:
+    items = data.get("items") or []
+    if not items:
         return None
 
-    entry = data[key]
-    title = entry.get("title") or ""
-    authors = entry.get("authors") or []
-    author_names = [a.get("name", "") for a in authors if isinstance(a, dict)]
-    author = ", ".join([n for n in author_names if n]).strip()
-
+    item = items[0] or {}
+    title = (item.get("title") or "").strip()
+    studio = (item.get("brand") or item.get("manufacturer") or "").strip()
     if not title:
         return None
-    return {"title": title, "author": author}
+    return {"title": title, "studio": studio}
 
 
 # -------------------------- DB Layer --------------------------
@@ -377,7 +272,7 @@ class DB:
             # Unknown old schema; safest is to stop and ask user to reset DB
             raise RuntimeError(
                 "Detected an older 'sales' table with book_id but unknown columns. "
-                "Please delete bookstore.db and re-run, or provide your sales schema for a custom migration."
+                "Please delete dvd_vhs_tracker.db and re-run, or provide your sales schema for a custom migration."
             )
 
         cur = conn.cursor()
@@ -609,13 +504,12 @@ class DB:
 
             # Seed settings
             defaults = {
-                "store_name": "My Bookstore",
+                "store_name": "My DVD/VHS Store",
                 "store_address": "123 Main St",
                 "store_phone": "(000) 000-0000",
                 "receipt_footer": "Thank you! Returns with receipt within 14 days.",
                 "receipt_prefix": "R",
                 "tax_rate_default": "0.00",
-                "google_books_api_key": "",
             }
             for k, v in defaults.items():
                 cur.execute("INSERT OR IGNORE INTO settings(key,value) VALUES(?,?);", (k, v))
@@ -708,7 +602,7 @@ class DB:
             conn.execute("UPDATE categories SET is_active=? WHERE id=?;", (int(active), int(cat_id)))
             conn.commit()
 
-    # -------- Books --------
+    # -------- Titles --------
     def list_books(
         self,
         search: str = "",
@@ -807,7 +701,7 @@ class DB:
             cur.execute("SELECT stock_qty FROM books WHERE id=?;", (int(book_id),))
             row = cur.fetchone()
             if not row:
-                raise ValueError("book missing")
+                raise ValueError("title missing")
             new_qty = int(row[0]) + int(delta)
             if new_qty < 0:
                 raise ValueError("insufficient stock")
@@ -1029,10 +923,10 @@ class DB:
                 """, (book_id,))
                 b = cur.fetchone()
                 if not b:
-                    raise ValueError("book missing")
+                    raise ValueError("title missing")
                 title, author, price_cents, cost_cents, stock_qty, is_active = b
                 if not int(is_active):
-                    raise ValueError(f"book archived: {title}")
+                    raise ValueError(f"title archived: {title}")
                 if int(stock_qty) < qty:
                     raise ValueError(f"insufficient stock for '{title}' (have {stock_qty}, need {qty})")
 
@@ -1224,7 +1118,7 @@ class DB:
                 if qty <= 0:
                     raise ValueError("bad qty")
                 if book_id not in orig_map:
-                    raise ValueError("book not in original sale")
+                    raise ValueError("title not in original sale")
                 if qty > orig_map[book_id]["qty"]:
                     raise ValueError("return qty exceeds sold qty")
                 unit = orig_map[book_id]["unit"]
@@ -1243,13 +1137,13 @@ class DB:
             header.append(f"Date: {created_at}")
             header.append(f"Reason: {reason or ''}")
             header.append("-" * 64)
-            header.append(f"{'Book':34} {'Qty':>3} {'Unit':>10} {'Line':>10}")
+            header.append(f"{'Title':34} {'Qty':>3} {'Unit':>10} {'Line':>10}")
             header.append("-" * 64)
 
             for (book_id, qty, unit, line_total) in receipt_lines:
                 cur.execute("SELECT title FROM books WHERE id=?;", (int(book_id),))
                 t = cur.fetchone()
-                title = t[0] if t else f"Book #{book_id}"
+                title = t[0] if t else f"Title #{book_id}"
                 if len(title) > 34:
                     title = title[:33] + "…"
                 header.append(f"{title:34} {qty:>3} {cents_to_money(unit):>10} {cents_to_money(line_total):>10}")
@@ -1587,7 +1481,7 @@ class App:
         self.cart: Dict[int, Dict[str, Any]] = {}
 
         self.root = tk.Tk()
-        self.root.title("Bookstore POS (Fixed)")
+        self.root.title("DVD/VHS POS (Fixed)")
         self.root.geometry("1200x720")
 
         self._login()
@@ -1621,7 +1515,7 @@ class App:
             auth = self.db.auth_user(u, p)
             if auth:
                 self.user = auth
-                self.root.title(f"Bookstore POS — {auth['username']} ({auth['role']})")
+                self.root.title(f"DVD/VHS POS — {auth['username']} ({auth['role']})")
                 return
             messagebox.showerror("Login failed", "Invalid username/password or inactive user.")
 
@@ -1631,14 +1525,10 @@ class App:
             return False
         return True
 
-    def _get_google_books_api_key(self) -> Optional[str]:
-        key = self.db.get_setting("google_books_api_key").strip()
-        return key or None
-
-    # ---------------- Books tab ----------------
+    # ---------------- Titles tab ----------------
     def _build_books_tab(self):
         tab = ttk.Frame(self.notebook)
-        self.notebook.add(tab, text="Books")
+        self.notebook.add(tab, text="DVD/VHS")
         self.books_tab = tab
 
         top = ttk.Frame(tab)
@@ -1665,10 +1555,10 @@ class App:
 
         self.books_tree = ttk.Treeview(tab, columns=("isbn", "title", "author", "category", "price", "cost", "stock", "active"), show="headings", height=18)
         for col, lbl, w, anchor in [
-            ("isbn", "ISBN", 120, "w"),
+            ("isbn", "Barcode", 140, "w"),
             ("title", "Title", 300, "w"),
-            ("author", "Author", 180, "w"),
-            ("category", "Category", 130, "w"),
+            ("author", "Studio", 180, "w"),
+            ("category", "Format", 130, "w"),
             ("price", "Price", 90, "e"),
             ("cost", "Cost", 90, "e"),
             ("stock", "Stock", 70, "center"),
@@ -1703,12 +1593,12 @@ class App:
 
     def add_book(self):
         """
-        Add book dialog with scan support:
-        - scan string can include ISBN or ISBN+price add-on or price-only barcode.
-        - lookup via Open Library if ISBN present.
+        Add title dialog with scan support:
+        - scan string can include UPC/EAN barcode or price-only barcode.
+        - lookup via UPCItemDB if barcode present.
         """
         dlg = tk.Toplevel(self.root)
-        dlg.title("Add Book (scan ISBN/price)")
+        dlg.title("Add Title (scan barcode/price)")
         dlg.transient(self.root)
         dlg.grab_set()
         dlg.resizable(False, False)
@@ -1733,39 +1623,39 @@ class App:
             if not raw:
                 messagebox.showerror("Scan needed", "Scan something into the Scan field.", parent=dlg)
                 return
-            isbn, price = parse_scan_isbn_and_price(raw)
-            if isbn:
-                isbn_var.set(isbn)
+            barcode, price = parse_scan_barcode_and_price(raw)
+            if barcode:
+                isbn_var.set(barcode)
             if price:
                 price_var.set(price)
-            if not isbn and not price:
-                messagebox.showerror("Unrecognized", "Could not parse ISBN or price from scan.", parent=dlg)
+            if not barcode and not price:
+                messagebox.showerror("Unrecognized", "Could not parse barcode or price from scan.", parent=dlg)
                 return
-            show_status(f"Parsed scan → ISBN: {isbn or '(none)'}  Price: {price or '(none)'}")
+            show_status(f"Parsed scan → Barcode: {barcode or '(none)'}  Price: {price or '(none)'}")
 
-            # auto-lookup if isbn found
-            if isbn:
-                info = fetch_book_info_openlibrary(isbn)
+            # auto-lookup if barcode found
+            if barcode:
+                info = fetch_title_info_upcitemdb(barcode)
                 if info:
                     title_var.set(info.get("title", ""))
-                    author_var.set(info.get("author", ""))
-                    show_status("Parsed + ISBN lookup OK (title/author filled).")
+                    author_var.set(info.get("studio", ""))
+                    show_status("Parsed + barcode lookup OK (title/studio filled).")
                 else:
-                    show_status("Parsed ISBN, but lookup failed (enter title/author manually).")
+                    show_status("Parsed barcode, but lookup failed (enter title/studio manually).")
 
-        def do_lookup_isbn():
-            isbn = normalize_isbn(isbn_var.get())
-            if not isbn:
-                messagebox.showerror("Invalid ISBN", "No valid ISBN detected in ISBN field.", parent=dlg)
+        def do_lookup_barcode():
+            barcode = normalize_barcode(isbn_var.get())
+            if not barcode:
+                messagebox.showerror("Invalid barcode", "No valid barcode detected in Barcode field.", parent=dlg)
                 return
-            isbn_var.set(isbn)
-            info = fetch_book_info_openlibrary(isbn)
+            isbn_var.set(barcode)
+            info = fetch_title_info_upcitemdb(barcode)
             if not info:
                 messagebox.showerror("Lookup failed", "Could not fetch metadata (no result or no internet).", parent=dlg)
                 return
             title_var.set(info.get("title", ""))
-            author_var.set(info.get("author", ""))
-            show_status("ISBN lookup OK (title/author filled).")
+            author_var.set(info.get("studio", ""))
+            show_status("Barcode lookup OK (title/studio filled).")
 
         def do_parse_price_field():
             p = parse_price_from_scan(price_var.get())
@@ -1777,27 +1667,27 @@ class App:
 
         # Layout
         r = 0
-        ttk.Label(frame, text="Scan (ISBN, ISBN+price add-on, or price-only):").grid(row=r, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Scan (barcode or price-only):").grid(row=r, column=0, sticky="w", pady=4)
         scan_entry = ttk.Entry(frame, textvariable=scan_var, width=46)
         scan_entry.grid(row=r, column=1, pady=4, sticky="w")
         ttk.Button(frame, text="Parse Scan", command=do_parse_scan).grid(row=r, column=2, padx=8)
         scan_entry.bind("<Return>", lambda _e: do_parse_scan())
         r += 1
 
-        ttk.Label(frame, text="ISBN:").grid(row=r, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Barcode:").grid(row=r, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=isbn_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
-        ttk.Button(frame, text="Lookup ISBN", command=do_lookup_isbn).grid(row=r, column=2, padx=8)
+        ttk.Button(frame, text="Lookup Barcode", command=do_lookup_barcode).grid(row=r, column=2, padx=8)
         r += 1
 
         ttk.Label(frame, text="Title:").grid(row=r, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=title_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
         r += 1
 
-        ttk.Label(frame, text="Author:").grid(row=r, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Studio:").grid(row=r, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=author_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
         r += 1
 
-        ttk.Label(frame, text="Category (optional):").grid(row=r, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Format (optional, e.g., DVD/VHS):").grid(row=r, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=cat_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
         r += 1
 
@@ -1821,7 +1711,7 @@ class App:
         r += 1
 
         def on_add():
-            isbn = normalize_isbn(isbn_var.get()) or None
+            isbn = normalize_barcode(isbn_var.get()) or None
             title = title_var.get().strip()
             author = author_var.get().strip()
             cat_name = cat_var.get().strip()
@@ -1830,7 +1720,7 @@ class App:
             stock_s = stock_var.get().strip()
 
             if not title or not author:
-                messagebox.showerror("Missing data", "Title and Author are required.", parent=dlg)
+                messagebox.showerror("Missing data", "Title and Studio are required.", parent=dlg)
                 return
 
             try:
@@ -1859,7 +1749,7 @@ class App:
             try:
                 self.db.add_book(isbn, title, author, cat_id, price_cents, cost_cents, stock, 1)
             except sqlite3.IntegrityError as e:
-                messagebox.showerror("DB error", f"Could not add book.\n\n{e}", parent=dlg)
+                messagebox.showerror("DB error", f"Could not add title.\n\n{e}", parent=dlg)
                 return
 
             dlg.destroy()
@@ -1869,7 +1759,7 @@ class App:
         btns = ttk.Frame(frame)
         btns.grid(row=r, column=0, columnspan=3, sticky="e", pady=(10, 0))
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="right")
-        ttk.Button(btns, text="Add Book", command=on_add).pack(side="right", padx=8)
+        ttk.Button(btns, text="Add Title", command=on_add).pack(side="right", padx=8)
 
         scan_entry.focus_set()
         self.root.wait_window(dlg)
@@ -1877,11 +1767,11 @@ class App:
     def edit_book(self):
         bid = self._selected_book_id()
         if not bid:
-            messagebox.showerror("No selection", "Select a book.")
+            messagebox.showerror("No selection", "Select a title.")
             return
         row = self.db.get_book(bid)
         if not row:
-            messagebox.showerror("Missing", "Book not found.")
+            messagebox.showerror("Missing", "Title not found.")
             return
 
         _id, isbn, title, author, cat_id, price, cost, stock, active = row
@@ -1894,7 +1784,7 @@ class App:
                     break
 
         dlg = tk.Toplevel(self.root)
-        dlg.title("Edit Book")
+        dlg.title("Edit Title")
         dlg.transient(self.root)
         dlg.grab_set()
         dlg.resizable(False, False)
@@ -1923,7 +1813,7 @@ class App:
             show_status("Price parsed/normalized.")
 
         r = 0
-        ttk.Label(frame, text="ISBN (optional):").grid(row=r, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Barcode (optional):").grid(row=r, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=isbn_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
         r += 1
 
@@ -1931,11 +1821,11 @@ class App:
         ttk.Entry(frame, textvariable=title_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
         r += 1
 
-        ttk.Label(frame, text="Author:").grid(row=r, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Studio:").grid(row=r, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=author_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
         r += 1
 
-        ttk.Label(frame, text="Category (optional):").grid(row=r, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Format (optional, e.g., DVD/VHS):").grid(row=r, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=cat_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
         r += 1
 
@@ -1962,7 +1852,7 @@ class App:
         r += 1
 
         def on_save():
-            isbn_val = normalize_isbn(isbn_var.get()) or None
+            isbn_val = normalize_barcode(isbn_var.get()) or None
             title_val = title_var.get().strip()
             author_val = author_var.get().strip()
             cat_name = cat_var.get().strip()
@@ -1971,7 +1861,7 @@ class App:
             stock_s = stock_var.get().strip()
 
             if not title_val or not author_val:
-                messagebox.showerror("Missing data", "Title and Author are required.", parent=dlg)
+                messagebox.showerror("Missing data", "Title and Studio are required.", parent=dlg)
                 return
 
             try:
@@ -2015,26 +1905,26 @@ class App:
     def delete_book(self):
         bid = self._selected_book_id()
         if not bid:
-            messagebox.showerror("No selection", "Select a book.")
+            messagebox.showerror("No selection", "Select a title.")
             return
         row = self.db.get_book(bid)
         if not row:
-            messagebox.showerror("Missing", "Book not found.")
+            messagebox.showerror("Missing", "Title not found.")
             return
         title = row[2]
-        if not messagebox.askyesno("Delete Book", f"Delete '{title}' permanently?"):
+        if not messagebox.askyesno("Delete Title", f"Delete '{title}' permanently?"):
             return
         try:
             self.db.delete_book(bid)
         except sqlite3.IntegrityError:
-            messagebox.showerror("Delete failed", "Cannot delete a book with related sales/returns. Archive instead.")
+            messagebox.showerror("Delete failed", "Cannot delete a title with related sales/returns. Archive instead.")
             return
         self.refresh_books()
 
     def toggle_book_active(self):
         bid = self._selected_book_id()
         if not bid:
-            messagebox.showerror("No selection", "Select a book.")
+            messagebox.showerror("No selection", "Select a title.")
             return
         row = self.db.get_book(bid)
         if not row:
@@ -2046,9 +1936,9 @@ class App:
     def restock_book(self):
         bid = self._selected_book_id()
         if not bid:
-            messagebox.showerror("No selection", "Select a book.")
+            messagebox.showerror("No selection", "Select a title.")
             return
-        data = Dialog.ask_fields(self.root, "Restock Book", [("Add quantity (positive integer)", "qty")], initial={"qty": "1"})
+        data = Dialog.ask_fields(self.root, "Restock Title", [("Add quantity (positive integer)", "qty")], initial={"qty": "1"})
         if not data:
             return
         try:
@@ -2066,7 +1956,7 @@ class App:
         self.refresh_books()
 
     def export_books_csv(self):
-        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")], title="Export Books CSV")
+        path = filedialog.asksaveasfilename(defaultextension=".csv", filetypes=[("CSV", "*.csv")], title="Export Titles CSV")
         if not path:
             return
         q = """
@@ -2074,7 +1964,7 @@ class App:
             FROM books
             ORDER BY title;
         """
-        self.db.export_table_to_csv(q, ["isbn", "title", "author", "price_cents", "cost_cents", "stock_qty", "is_active"], path)
+        self.db.export_table_to_csv(q, ["barcode", "title", "studio", "price_cents", "cost_cents", "stock_qty", "is_active"], path)
         messagebox.showinfo("Exported", f"Saved:\n{path}")
 
     # ---------------- Customers tab ----------------
@@ -2205,7 +2095,7 @@ class App:
         top = ttk.Frame(tab)
         top.pack(fill="x", padx=10, pady=10)
 
-        ttk.Label(top, text="Scan/Type ISBN or Title:").pack(side="left")
+        ttk.Label(top, text="Scan/Type Barcode or Title:").pack(side="left")
         self.scan_var = tk.StringVar()
         scan_entry = ttk.Entry(top, textvariable=self.scan_var, width=40)
         scan_entry.pack(side="left", padx=(6, 12))
@@ -2234,13 +2124,13 @@ class App:
         self.pos_customer_tree.column("email", width=260)
         self.pos_customer_tree.pack(fill="x", pady=(4, 10))
 
-        ttk.Label(left, text="Books (double-click to add)").pack(anchor="w")
+        ttk.Label(left, text="Titles (double-click to add)").pack(anchor="w")
         self.pos_books_tree = ttk.Treeview(left, columns=("isbn", "title", "price", "stock"), show="headings", height=14)
-        self.pos_books_tree.heading("isbn", text="ISBN")
+        self.pos_books_tree.heading("isbn", text="Barcode")
         self.pos_books_tree.heading("title", text="Title")
         self.pos_books_tree.heading("price", text="Price")
         self.pos_books_tree.heading("stock", text="Stock")
-        self.pos_books_tree.column("isbn", width=120)
+        self.pos_books_tree.column("isbn", width=140)
         self.pos_books_tree.column("title", width=280)
         self.pos_books_tree.column("price", width=90, anchor="e")
         self.pos_books_tree.column("stock", width=60, anchor="center")
@@ -2252,7 +2142,7 @@ class App:
         ttk.Label(addrow, text="Add qty:").pack(side="left")
         self.add_qty_var = tk.StringVar(value="1")
         ttk.Entry(addrow, textvariable=self.add_qty_var, width=6).pack(side="left", padx=(6, 10))
-        ttk.Button(addrow, text="Add Selected Book", command=self.add_selected_book_to_cart).pack(side="left")
+        ttk.Button(addrow, text="Add Selected Title", command=self.add_selected_book_to_cart).pack(side="left")
 
         # Cart
         cartbox = ttk.LabelFrame(right, text="Cart (double-click Qty/LineDisc to edit)")
@@ -2352,21 +2242,21 @@ class App:
             messagebox.showerror("Bad qty", "Scan qty must be a positive integer.")
             return
 
-        # Try ISBN exact first
-        isbn = normalize_isbn(text)
-        rows = self.db.list_books(search=isbn or text, in_stock_only=False, include_inactive=False)
+        # Try barcode exact first
+        barcode = normalize_barcode(text)
+        rows = self.db.list_books(search=barcode or text, in_stock_only=False, include_inactive=False)
 
         pick = None
-        if isbn:
+        if barcode:
             for r in rows:
-                if (r[1] or "") == isbn:
+                if (r[1] or "") == barcode:
                     pick = r
                     break
         if pick is None and rows:
             pick = rows[0]
 
         if not pick:
-            messagebox.showerror("Not found", "No matching book found.")
+            messagebox.showerror("Not found", "No matching title found.")
             return
 
         bid = int(pick[0])
@@ -2377,7 +2267,7 @@ class App:
     def add_selected_book_to_cart(self):
         sel = self.pos_books_tree.selection()
         if not sel:
-            messagebox.showerror("No selection", "Select a book.")
+            messagebox.showerror("No selection", "Select a title.")
             return
         try:
             qty = int(self.add_qty_var.get().strip())
@@ -2392,7 +2282,7 @@ class App:
     def _add_to_cart(self, book_id: int, qty: int):
         b = self.db.get_book(book_id)
         if not b:
-            raise ValueError("book missing")
+            raise ValueError("title missing")
         _id, isbn, title, author, cat_id, price, cost, stock, active = b
         if not int(active):
             raise ValueError("archived")
@@ -2859,11 +2749,11 @@ class App:
             self.monthly_tree.column(c, width=w, anchor=a)
         self.monthly_tree.pack(fill="both", expand=True, padx=10, pady=10)
 
-        topbooks = ttk.LabelFrame(right, text="Top books (revenue + profit)")
+        topbooks = ttk.LabelFrame(right, text="Top titles (revenue + profit)")
         topbooks.pack(fill="both", expand=True, pady=(0, 10))
         self.top_books = ttk.Treeview(topbooks, columns=("title", "units", "rev", "profit"), show="headings", height=8)
         for c, l, w, a in [
-            ("title", "Book", 260, "w"),
+            ("title", "Title", 260, "w"),
             ("units", "Units", 70, "center"),
             ("rev", "Revenue", 120, "e"),
             ("profit", "Profit", 120, "e"),
@@ -2884,11 +2774,11 @@ class App:
             self.top_customers.column(c, width=w, anchor=a)
         self.top_customers.pack(fill="both", expand=True, padx=10, pady=10)
 
-        bycat = ttk.LabelFrame(right, text="By category (revenue + profit)")
+        bycat = ttk.LabelFrame(right, text="By format (revenue + profit)")
         bycat.pack(fill="both", expand=True)
         self.by_category = ttk.Treeview(bycat, columns=("cat", "rev", "profit"), show="headings", height=6)
         for c, l, w, a in [
-            ("cat", "Category", 220, "w"),
+            ("cat", "Format", 220, "w"),
             ("rev", "Revenue", 120, "e"),
             ("profit", "Profit", 120, "e"),
         ]:
@@ -2997,7 +2887,6 @@ class App:
         self.set_footer = tk.StringVar(value=self.db.get_setting("receipt_footer"))
         self.set_prefix = tk.StringVar(value=self.db.get_setting("receipt_prefix"))
         self.set_taxdef = tk.StringVar(value=self.db.get_setting("tax_rate_default"))
-        self.set_google_books_key = tk.StringVar(value=self.db.get_setting("google_books_api_key"))
 
         def row(parent, label, var, show: str = ""):
             r = ttk.Frame(parent)
@@ -3011,7 +2900,6 @@ class App:
         row(settings, "Footer:", self.set_footer)
         row(settings, "Receipt prefix:", self.set_prefix)
         row(settings, "Default tax:", self.set_taxdef)
-        row(settings, "Google Books key:", self.set_google_books_key, show="*")
         ttk.Button(settings, text="Save Settings", command=self.save_settings).pack(anchor="e", padx=10, pady=(6, 10))
 
         backup = ttk.LabelFrame(left, text="Backup / Restore")
@@ -3021,7 +2909,7 @@ class App:
         ttk.Button(bbtn, text="Backup DB", command=self.backup_db).pack(side="left")
         ttk.Button(bbtn, text="Restore DB", command=self.restore_db).pack(side="left", padx=8)
 
-        cats = ttk.LabelFrame(right, text="Categories")
+        cats = ttk.LabelFrame(right, text="Formats")
         cats.pack(fill="both", expand=True, pady=(0, 10))
 
         self.cat_tree = ttk.Treeview(cats, columns=("name", "active"), show="headings", height=6)
@@ -3100,7 +2988,6 @@ class App:
         self.db.set_setting("receipt_footer", self.set_footer.get().strip())
         self.db.set_setting("receipt_prefix", self.set_prefix.get().strip() or "R")
         self.db.set_setting("tax_rate_default", self.set_taxdef.get().strip() or "0.00")
-        self.db.set_setting("google_books_api_key", self.set_google_books_key.get().strip())
         self.tax_var.set(self.db.get_setting("tax_rate_default") or "0.00")
         messagebox.showinfo("Saved", "Settings saved.")
 
@@ -3109,7 +2996,7 @@ class App:
             defaultextension=".db",
             filetypes=[("SQLite DB", "*.db")],
             title="Backup DB",
-            initialfile=f"bookstore_backup_{today_ymd()}.db"
+            initialfile=f"dvd_vhs_backup_{today_ymd()}.db"
         )
         if not path:
             return
@@ -3139,7 +3026,7 @@ class App:
     def add_category(self):
         if not self._require_admin():
             return
-        data = Dialog.ask_fields(self.root, "Add Category", [("Name", "name")])
+        data = Dialog.ask_fields(self.root, "Add Format", [("Name", "name")])
         if not data:
             return
         try:
