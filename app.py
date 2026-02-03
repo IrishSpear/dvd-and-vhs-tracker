@@ -1856,10 +1856,16 @@ class App:
         btns = ttk.Frame(frame)
         btns.grid(row=r, column=0, columnspan=3, sticky="e", pady=(10, 0))
         ttk.Button(btns, text="Cancel", command=dlg.destroy).pack(side="right")
-        ttk.Button(btns, text="Add Title", command=on_add).pack(side="right", padx=8)
+        add_btn = ttk.Button(btns, text="Add Title", command=on_add)
+        add_btn.pack(side="right", padx=8)
+
+        def on_scan_enter(_event):
+            do_parse_scan()
+            add_btn.focus_set()
+            return "break"
 
         dlg.bind("<Return>", lambda _e: on_add())
-        scan_entry.bind("<Shift-Return>", lambda _e: do_parse_scan())
+        scan_entry.bind("<Return>", on_scan_enter)
         scan_entry.focus_set()
         self.root.wait_window(dlg)
 
