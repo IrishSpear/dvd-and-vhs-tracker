@@ -673,6 +673,15 @@ class DB:
             """, (int(book_id),))
             return cur.fetchone()
 
+    def get_book_by_isbn(self, isbn: str):
+        with self._connect() as conn:
+            cur = conn.cursor()
+            cur.execute("""
+                SELECT id, isbn, title, author, category_id, price_cents, cost_cents, stock_qty, is_active
+                FROM books WHERE isbn=?;
+            """, (isbn,))
+            return cur.fetchone()
+
     def add_book(self, isbn, title, author, category_id, price_cents, cost_cents, stock_qty, is_active=1):
         with self._connect() as conn:
             conn.execute("""
@@ -1614,7 +1623,7 @@ class App:
         cat_var = tk.StringVar(value=self.last_format_choice)
         price_var = tk.StringVar(value="0.00")
         cost_var = tk.StringVar(value="0.00")
-        stock_var = tk.StringVar(value="0")
+        stock_var = tk.StringVar(value="1")
 
         def show_status(msg: str):
             status_lbl.configure(text=msg)
@@ -1793,7 +1802,14 @@ class App:
                         break
 
             try:
-                self.db.add_book(isbn, title, author, cat_id, price_cents, cost_cents, stock, 1)
+                if isbn:
+                    existing = self.db.get_book_by_isbn(isbn)
+                    if existing:
+                        self.db.adjust_stock(int(existing[0]), 1)
+                    else:
+                        self.db.add_book(isbn, title, author, cat_id, price_cents, cost_cents, stock, 1)
+                else:
+                    self.db.add_book(isbn, title, author, cat_id, price_cents, cost_cents, stock, 1)
             except sqlite3.IntegrityError as e:
                 messagebox.showerror("DB error", f"Could not add title.\n\n{e}", parent=dlg)
                 return
