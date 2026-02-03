@@ -1479,6 +1479,7 @@ class App:
         self.db = DB(DB_PATH)
         self.user = None  # dict{id,username,role}
         self.cart: Dict[int, Dict[str, Any]] = {}
+        self.last_format_choice = ""
 
         self.root = tk.Tk()
         self.root.title("DVD/VHS POS (Fixed)")
@@ -1610,7 +1611,7 @@ class App:
         isbn_var = tk.StringVar(value="")
         title_var = tk.StringVar(value="")
         author_var = tk.StringVar(value="")
-        cat_var = tk.StringVar(value="")
+        cat_var = tk.StringVar(value=self.last_format_choice)
         price_var = tk.StringVar(value="0.00")
         cost_var = tk.StringVar(value="0.00")
         stock_var = tk.StringVar(value="0")
@@ -1688,8 +1689,48 @@ class App:
         r += 1
 
         ttk.Label(frame, text="Format (optional, e.g., DVD/VHS):").grid(row=r, column=0, sticky="w", pady=4)
-        ttk.Entry(frame, textvariable=cat_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
+        format_entry = ttk.Entry(frame, textvariable=cat_var, width=46)
+        format_entry.grid(row=r, column=1, pady=4, sticky="w")
+        format_choices = ("DVD", "Blu-ray", "VHS")
+        format_vars = {choice: tk.IntVar(value=1 if self.last_format_choice == choice else 0) for choice in format_choices}
+
+        def sync_format_choice(choice: str) -> None:
+            for name, var in format_vars.items():
+                var.set(1 if name == choice else 0)
+            cat_var.set(choice)
+            self.last_format_choice = choice
+
+        def on_format_toggle(choice: str) -> None:
+            if format_vars[choice].get():
+                sync_format_choice(choice)
+            elif cat_var.get().strip() == choice:
+                cat_var.set("")
+                self.last_format_choice = ""
+
+        format_box = ttk.Frame(frame)
+        format_box.grid(row=r, column=2, padx=8, sticky="w")
+        for choice in format_choices:
+            ttk.Checkbutton(
+                format_box,
+                text=choice,
+                variable=format_vars[choice],
+                command=lambda c=choice: on_format_toggle(c),
+            ).pack(side="left")
         r += 1
+
+        def on_format_entry_change(*_args):
+            current = cat_var.get().strip()
+            matched = next((c for c in format_choices if c.lower() == current.lower()), None)
+            if matched:
+                if self.last_format_choice != matched:
+                    sync_format_choice(matched)
+            else:
+                for var in format_vars.values():
+                    var.set(0)
+                if current:
+                    self.last_format_choice = current
+
+        cat_var.trace_add("write", on_format_entry_change)
 
         ttk.Label(frame, text="Price (e.g. 12.99):").grid(row=r, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=price_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
@@ -1732,6 +1773,11 @@ class App:
             except Exception:
                 messagebox.showerror("Bad input", "Check price/cost/stock values.", parent=dlg)
                 return
+
+            if cat_name:
+                self.last_format_choice = cat_name
+            else:
+                self.last_format_choice = ""
 
             # category: auto-create if provided
             cat_id = None
@@ -2235,7 +2281,8 @@ class App:
         if not text:
             return
         try:
-            qty = int(self.scan_qty_var.get().strip())
+            qty_raw = self.scan_qty_var.get().strip()
+            qty = int(qty_raw) if qty_raw else 1
             if qty <= 0:
                 raise ValueError
         except Exception:
@@ -2262,6 +2309,7 @@ class App:
         bid = int(pick[0])
         self._add_to_cart(bid, qty)
         self.scan_var.set("")
+        self.scan_qty_var.set("1")
         self.refresh_cart()
 
     def add_selected_book_to_cart(self):
