@@ -1843,7 +1843,6 @@ class App:
                 isbn_var.set("")
                 title_var.set("")
                 author_var.set("")
-                location_var.set("")
                 price_var.set("0.00")
                 cost_var.set("0.00")
                 stock_var.set("1")
