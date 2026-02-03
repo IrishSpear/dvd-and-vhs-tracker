@@ -1792,8 +1792,8 @@ class App:
             cost_s = cost_var.get().strip()
             stock_s = stock_var.get().strip()
 
-            if not title or not author:
-                messagebox.showerror("Missing data", "Title and Studio are required.", parent=dlg)
+            if not title:
+                messagebox.showerror("Missing data", "Title is required.", parent=dlg)
                 return
 
             try:
@@ -1970,8 +1970,8 @@ class App:
             cost_s = cost_var.get().strip()
             stock_s = stock_var.get().strip()
 
-            if not title_val or not author_val:
-                messagebox.showerror("Missing data", "Title and Studio are required.", parent=dlg)
+            if not title_val:
+                messagebox.showerror("Missing data", "Title is required.", parent=dlg)
                 return
 
             try:
