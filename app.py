@@ -180,6 +180,44 @@ def parse_scan_barcode_and_price(raw: str) -> Tuple[Optional[str], Optional[str]
     return barcode, price
 
 
+def parse_locations(raw: Optional[str]) -> List[str]:
+    if not raw:
+        return []
+    parts = re.split(r"[,;\n]+", raw)
+    seen = set()
+    locations = []
+    for part in parts:
+        loc = part.strip()
+        if not loc:
+            continue
+        key = loc.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        locations.append(loc)
+    return locations
+
+
+def normalize_locations(raw: Optional[str]) -> Optional[str]:
+    locations = parse_locations(raw)
+    return ", ".join(locations) if locations else None
+
+
+def merge_locations(existing: Optional[str], incoming: Optional[str]) -> Optional[str]:
+    combined = parse_locations(existing) + parse_locations(incoming)
+    if not combined:
+        return None
+    seen = set()
+    merged = []
+    for loc in combined:
+        key = loc.lower()
+        if key in seen:
+            continue
+        seen.add(key)
+        merged.append(loc)
+    return ", ".join(merged)
+
+
 
 def fetch_json_with_retry(url: str, timeout: int = 8, retries: int = 2) -> Tuple[Optional[Dict[str, Any]], Optional[str]]:
     last_error = None
@@ -703,6 +741,11 @@ class DB:
                 SET isbn=?, title=?, author=?, category_id=?, location=?, price_cents=?, cost_cents=?, stock_qty=?, is_active=?
                 WHERE id=?;
             """, (isbn or None, title.strip(), author.strip(), category_id, location, int(price_cents), int(cost_cents), int(stock_qty), int(is_active), int(book_id)))
+            conn.commit()
+
+    def set_book_location(self, book_id: int, location: Optional[str]) -> None:
+        with self._connect() as conn:
+            conn.execute("UPDATE books SET location=? WHERE id=?;", (location, int(book_id)))
             conn.commit()
 
     def delete_book(self, book_id: int) -> None:
@@ -1580,7 +1623,7 @@ class App:
             ("title", "Title", 300, "w"),
             ("author", "Studio", 180, "w"),
             ("category", "Format", 130, "w"),
-            ("location", "Location", 140, "w"),
+            ("location", "Locations", 160, "w"),
             ("price", "Price", 90, "e"),
             ("cost", "Cost", 90, "e"),
             ("stock", "Stock", 70, "center"),
@@ -1754,7 +1797,7 @@ class App:
 
         cat_var.trace_add("write", on_format_entry_change)
 
-        ttk.Label(frame, text="Location (optional):").grid(row=r, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Locations (comma-separated, optional):").grid(row=r, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=location_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
         r += 1
 
@@ -1787,7 +1830,7 @@ class App:
             title = title_var.get().strip()
             author = author_var.get().strip()
             cat_name = cat_var.get().strip()
-            location = location_var.get().strip() or None
+            location = normalize_locations(location_var.get())
             price_s = price_var.get().strip()
             cost_s = cost_var.get().strip()
             stock_s = stock_var.get().strip()
@@ -1829,6 +1872,9 @@ class App:
                     existing = self.db.get_book_by_isbn(isbn)
                     if existing:
                         self.db.adjust_stock(int(existing[0]), 1)
+                        merged_location = merge_locations(existing[5], location)
+                        if merged_location != existing[5]:
+                            self.db.set_book_location(int(existing[0]), merged_location)
                     else:
                         self.db.add_book(isbn, title, author, cat_id, location, price_cents, cost_cents, stock, 1)
                 else:
@@ -1934,7 +1980,7 @@ class App:
         ttk.Entry(frame, textvariable=cat_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
         r += 1
 
-        ttk.Label(frame, text="Location (optional):").grid(row=r, column=0, sticky="w", pady=4)
+        ttk.Label(frame, text="Locations (comma-separated, optional):").grid(row=r, column=0, sticky="w", pady=4)
         ttk.Entry(frame, textvariable=location_var, width=46).grid(row=r, column=1, pady=4, sticky="w")
         r += 1
 
@@ -1965,7 +2011,7 @@ class App:
             title_val = title_var.get().strip()
             author_val = author_var.get().strip()
             cat_name = cat_var.get().strip()
-            location_val = location_var.get().strip() or None
+            location_val = normalize_locations(location_var.get())
             price_s = price_var.get().strip()
             cost_s = cost_var.get().strip()
             stock_s = stock_var.get().strip()
@@ -2076,7 +2122,7 @@ class App:
         """
         self.db.export_table_to_csv(
             q,
-            ["barcode", "title", "studio", "location", "price_cents", "cost_cents", "stock_qty", "is_active"],
+            ["barcode", "title", "studio", "locations", "price_cents", "cost_cents", "stock_qty", "is_active"],
             path,
         )
         messagebox.showinfo("Exported", f"Saved:\n{path}")
